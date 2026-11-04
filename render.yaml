@@ -3,3 +3,4 @@ services:
     name: ergonomic-tracker-uabc
     runtime: static
     publishPath: .
+
