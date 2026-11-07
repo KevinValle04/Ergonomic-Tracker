@@ -1175,6 +1175,7 @@
         calibratedAngle: null,
         tareOffset: 0.0,
         isAlertActive: false,
+        badPostureStartTime: null,
         btn: document.getElementById('btnConnectLumbar'),
         row: document.getElementById('nodeRowLumbar'),
         preview: document.getElementById('previewLumbar'),
@@ -1192,6 +1193,7 @@
         calibratedAngle: null,
         tareOffset: 0.0,
         isAlertActive: false,
+        badPostureStartTime: null,
         btn: document.getElementById('btnConnectWristL'),
         row: document.getElementById('nodeRowWristL'),
         preview: document.getElementById('previewWristL'),
@@ -1209,6 +1211,7 @@
         calibratedAngle: null,
         tareOffset: 0.0,
         isAlertActive: false,
+        badPostureStartTime: null,
         btn: document.getElementById('btnConnectWristR'),
         row: document.getElementById('nodeRowWristR'),
         preview: document.getElementById('previewWristR'),
@@ -1471,10 +1474,10 @@
         return;
       }
 
-      // Evaluar cada nodo obedeciendo la bandera de alerta enviada por el ESP32 (>3s continuos)
-      const lumbarBad = NODES.lumbar.isConnected && NODES.lumbar.calibratedAngle !== null && NODES.lumbar.isAlertActive;
-      const wristLBad = NODES.wristL.isConnected && NODES.wristL.calibratedAngle !== null && NODES.wristL.isAlertActive;
-      const wristRBad = NODES.wristR.isConnected && NODES.wristR.calibratedAngle !== null && NODES.wristR.isAlertActive;
+      // Evaluar cada nodo: solo es mala postura si está conectado, supera el umbral (+/-15°) Y se confirmó la alerta (>3s)
+      const lumbarBad = NODES.lumbar.isConnected && NODES.lumbar.calibratedAngle !== null && NODES.lumbar.isAlertActive && Math.abs(NODES.lumbar.calibratedAngle) > BLE_CONFIG.angleThreshold;
+      const wristLBad = NODES.wristL.isConnected && NODES.wristL.calibratedAngle !== null && NODES.wristL.isAlertActive && Math.abs(NODES.wristL.calibratedAngle) > BLE_CONFIG.angleThreshold;
+      const wristRBad = NODES.wristR.isConnected && NODES.wristR.calibratedAngle !== null && NODES.wristR.isAlertActive && Math.abs(NODES.wristR.calibratedAngle) > BLE_CONFIG.angleThreshold;
 
       const anyBad = lumbarBad || wristLBad || wristRBad;
 
@@ -1612,9 +1615,12 @@
         if (node.isConnected && node.rawAngle !== null) {
           node.tareOffset = node.rawAngle;
           node.calibratedAngle = 0.0;
+          node.badPostureStartTime = null;
+          node.isAlertActive = false;
           calibratedCount++;
         }
       });
+      inBadPostureState = false;
 
       btnTare.innerHTML = '✅ <span>Calibrado a 0°</span>';
       renderAiAdvice({
@@ -1738,6 +1744,7 @@
       node.rawAngle = null;
       node.calibratedAngle = null;
       node.isAlertActive = false;
+      node.badPostureStartTime = null;
       node.row.classList.remove('connected');
       node.btn.className = 'btn-node-toggle btn-node-connect';
       node.btn.textContent = 'Conectar';
@@ -1759,28 +1766,47 @@
         // Separar el ángulo y la bandera de alerta enviada por el ESP32
         const partes = textoRecibido.split(',');
         const angulo = parseFloat(partes[0]);
-        
-        // Es true solo si el ESP32 confirma que pasaron los 3 segundos continuos
-        // Si no viene la bandera (partes[1]), cae de vuelta por compatibilidad a umbral
-        const alertaReal = partes.length > 1 ? (partes[1].trim() === '1') : (Math.abs(angulo - node.tareOffset) > BLE_CONFIG.angleThreshold);
 
         if (!isNaN(angulo)) {
           node.rawAngle = angulo;
           node.calibratedAngle = angulo - node.tareOffset;
-          node.isAlertActive = alertaReal;
+          const absCalibrated = Math.abs(node.calibratedAngle);
+          const isAngleBeyondThreshold = absCalibrated > BLE_CONFIG.angleThreshold;
+
+          // FILTRO INTELIGENTE DE POSTURA & CALIBRACIÓN A CERO:
+          // 1. Si el ángulo CALIBRADO está dentro de los límites seguros (<= 15°),
+          //    NUNCA debe dispararse alerta (anula falsos positivos al calibrar a 0°).
+          if (!isAngleBeyondThreshold) {
+            node.badPostureStartTime = null;
+            node.isAlertActive = false;
+          } else {
+            // 2. Si está fuera de rango (> 15°):
+            // Si el sensor no tiene calibración relativa (tareOffset == 0) y el ESP32 mandó bandera:
+            if (node.tareOffset === 0 && partes.length > 1) {
+              node.isAlertActive = (partes[1].trim() === '1');
+            } else {
+              // Si el usuario calibró a 0°, medimos el tiempo de gracia de 3 segundos continuos
+              // en la PWA con base en el ángulo calibrado:
+              if (!node.badPostureStartTime) {
+                node.badPostureStartTime = Date.now();
+              }
+              const durationOutOfRange = Date.now() - node.badPostureStartTime;
+              node.isAlertActive = (durationOutOfRange >= 3000);
+            }
+          }
 
           // 1. Mostrar el valor numérico del ángulo en la pantalla
           const formatted = (node.calibratedAngle >= 0 ? '+' : '') + node.calibratedAngle.toFixed(1) + '°';
           
-          // Color verde para estado normal (ignora movimientos rápidos); rojo solo con alerta confirmada por ESP32
-          const color = alertaReal ? 'var(--brand-red)' : 'var(--brand-green)';
+          // Color verde para estado normal (ignora movimientos rápidos < 3s); rojo solo con alerta confirmada (>3s)
+          const color = node.isAlertActive ? 'var(--brand-red)' : 'var(--brand-green)';
 
           node.preview.textContent = formatted;
           node.preview.style.color = color;
           node.summary.textContent = formatted;
           node.summary.style.color = color;
 
-          // 2. Controlar la interfaz según la regla estricta del ESP32
+          // 2. Controlar la interfaz
           evaluateGlobalPosture();
         }
       } catch (err) {
