@@ -1174,6 +1174,7 @@
         rawAngle: null,
         calibratedAngle: null,
         tareOffset: 0.0,
+        isAlertActive: false,
         btn: document.getElementById('btnConnectLumbar'),
         row: document.getElementById('nodeRowLumbar'),
         preview: document.getElementById('previewLumbar'),
@@ -1190,6 +1191,7 @@
         rawAngle: null,
         calibratedAngle: null,
         tareOffset: 0.0,
+        isAlertActive: false,
         btn: document.getElementById('btnConnectWristL'),
         row: document.getElementById('nodeRowWristL'),
         preview: document.getElementById('previewWristL'),
@@ -1206,6 +1208,7 @@
         rawAngle: null,
         calibratedAngle: null,
         tareOffset: 0.0,
+        isAlertActive: false,
         btn: document.getElementById('btnConnectWristR'),
         row: document.getElementById('nodeRowWristR'),
         preview: document.getElementById('previewWristR'),
@@ -1468,10 +1471,10 @@
         return;
       }
 
-      // Evaluar cada nodo
-      const lumbarBad = NODES.lumbar.isConnected && NODES.lumbar.calibratedAngle !== null && Math.abs(NODES.lumbar.calibratedAngle) > BLE_CONFIG.angleThreshold;
-      const wristLBad = NODES.wristL.isConnected && NODES.wristL.calibratedAngle !== null && Math.abs(NODES.wristL.calibratedAngle) > BLE_CONFIG.angleThreshold;
-      const wristRBad = NODES.wristR.isConnected && NODES.wristR.calibratedAngle !== null && Math.abs(NODES.wristR.calibratedAngle) > BLE_CONFIG.angleThreshold;
+      // Evaluar cada nodo obedeciendo la bandera de alerta enviada por el ESP32 (>3s continuos)
+      const lumbarBad = NODES.lumbar.isConnected && NODES.lumbar.calibratedAngle !== null && NODES.lumbar.isAlertActive;
+      const wristLBad = NODES.wristL.isConnected && NODES.wristL.calibratedAngle !== null && NODES.wristL.isAlertActive;
+      const wristRBad = NODES.wristR.isConnected && NODES.wristR.calibratedAngle !== null && NODES.wristR.isAlertActive;
 
       const anyBad = lumbarBad || wristLBad || wristRBad;
 
@@ -1507,8 +1510,8 @@
         if (wristRBad) issues.push('Muñeca Derecha');
         if (wristLBad) issues.push('Muñeca Izquierda');
 
-        trafficTitle.textContent = `¡Alerta: Mala Postura! (${issues.join(', ')})`;
-        trafficDetail.textContent = 'Corrige tu posición para evitar sobrecarga muscular o túnel carpiano';
+        trafficTitle.textContent = `¡Alerta: Mala postura prolongada! (${issues.join(', ')})`;
+        trafficDetail.textContent = 'Se confirmaron más de 3 segundos continuos en mala posición. Corrige tu alineación.';
         triggerWarningBeep();
 
         if (lumbarBad && (wristRBad || wristLBad)) {
@@ -1532,7 +1535,8 @@
         const absAng = Math.abs(ang);
 
         angleDisplay.textContent = (ang >= 0 ? '+' : '') + ang.toFixed(1);
-        angleDisplay.style.color = absAng <= BLE_CONFIG.angleThreshold ? 'var(--brand-green)' : 'var(--brand-red)';
+        // Color verde si no hay alerta confirmada por el ESP32; rojo solo si el ESP32 confirmó >3s continuos
+        angleDisplay.style.color = node.isAlertActive ? 'var(--brand-red)' : 'var(--brand-green)';
 
         const clamped = Math.max(-45, Math.min(45, ang));
         const rotationDeg = (clamped / 45) * 65;
@@ -1733,6 +1737,7 @@
       node.isConnected = false;
       node.rawAngle = null;
       node.calibratedAngle = null;
+      node.isAlertActive = false;
       node.row.classList.remove('connected');
       node.btn.className = 'btn-node-toggle btn-node-connect';
       node.btn.textContent = 'Conectar';
@@ -1747,23 +1752,35 @@
     function onNodeNotification(nodeKey, event) {
       try {
         const node = NODES[nodeKey];
+        const value = event.target.value;
         const decoder = new TextDecoder('utf-8');
-        const str = decoder.decode(event.target.value).trim();
-        const angle = parseFloat(str);
+        const textoRecibido = decoder.decode(value).trim(); // Ejemplo: "18.5,1" o "12.0,0"
 
-        if (!isNaN(angle)) {
-          node.rawAngle = angle;
-          node.calibratedAngle = angle - node.tareOffset;
-          const absAngle = Math.abs(node.calibratedAngle);
+        // Separar el ángulo y la bandera de alerta enviada por el ESP32
+        const partes = textoRecibido.split(',');
+        const angulo = parseFloat(partes[0]);
+        
+        // Es true solo si el ESP32 confirma que pasaron los 3 segundos continuos
+        // Si no viene la bandera (partes[1]), cae de vuelta por compatibilidad a umbral
+        const alertaReal = partes.length > 1 ? (partes[1].trim() === '1') : (Math.abs(angulo - node.tareOffset) > BLE_CONFIG.angleThreshold);
 
+        if (!isNaN(angulo)) {
+          node.rawAngle = angulo;
+          node.calibratedAngle = angulo - node.tareOffset;
+          node.isAlertActive = alertaReal;
+
+          // 1. Mostrar el valor numérico del ángulo en la pantalla
           const formatted = (node.calibratedAngle >= 0 ? '+' : '') + node.calibratedAngle.toFixed(1) + '°';
-          const color = absAngle <= BLE_CONFIG.angleThreshold ? 'var(--brand-green)' : 'var(--brand-red)';
+          
+          // Color verde para estado normal (ignora movimientos rápidos); rojo solo con alerta confirmada por ESP32
+          const color = alertaReal ? 'var(--brand-red)' : 'var(--brand-green)';
 
           node.preview.textContent = formatted;
           node.preview.style.color = color;
           node.summary.textContent = formatted;
           node.summary.style.color = color;
 
+          // 2. Controlar la interfaz según la regla estricta del ESP32
           evaluateGlobalPosture();
         }
       } catch (err) {
